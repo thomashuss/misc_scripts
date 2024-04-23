@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+from math import acos, asin, ceil, cos, degrees, fmod, radians, sin, sqrt
+from time import time
+from sys import argv
+import configparser
+import json
+import os
+import urllib.request
+
+
+i3status = False
+
+
+# Source of sunrise algorithm: https://en.wikipedia.org/wiki/Sunrise_equation#Example_of_implementation_in_Python
+
+
+def j2ts_day_modulus(j: float | int) -> float:
+    return ((j - 2440587.5) % 1) * 86400
+
+
+def ts2j(ts: float | int) -> float:
+    return ts / 86400.0 + 2440587.5
+
+
+def dawn_dusk_calc(
+        current_timestamp: float,
+        f: float,
+        l_w: float,
+        elevation: float = 0.0,
+) -> tuple[float, float] | tuple[None, None]:
+    J_date = ts2j(current_timestamp)
+    n = ceil(J_date - (2451545.0 + 0.0009) + 69.184 / 86400.0)
+    J_ = n + 0.0009 - l_w / 360.0
+    M_degrees = fmod(357.5291 + 0.98560028 * J_, 360)
+    M_radians = radians(M_degrees)
+    C_degrees = 1.9148 * sin(M_radians) + 0.02 * \
+        sin(2 * M_radians) + 0.0003 * sin(3 * M_radians)
+    L_degrees = fmod(M_degrees + C_degrees + 180.0 + 102.9372, 360)
+    Lambda_radians = radians(L_degrees)
+    J_transit = 2451545.0 + J_ + 0.0053 * \
+        sin(M_radians) - 0.0069 * sin(2 * Lambda_radians)
+    sin_d = sin(Lambda_radians) * sin(radians(23.4397))
+    cos_d = cos(asin(sin_d))
+    some_cos = (sin(radians(-0.833 - 2.076 * sqrt(elevation) / 60.0)
+                    ) - sin(radians(f)) * sin_d) / (cos(radians(f)) * cos_d)
+    try:
+        w0_radians = acos(some_cos)
+    except ValueError:
+        return None, None
+    w0_degrees = degrees(w0_radians)
+    j_rise = J_transit - w0_degrees / 360
+    j_set = J_transit + w0_degrees / 360
+    return j2ts_day_modulus(j_rise), j2ts_day_modulus(j_set)
+
+
+def print_cloud(data):
+    if 'clouds' in data and data['clouds'] is not None and len(data['clouds']) > 0:
+        cloud = data['clouds'][-1]['cover']
+        if cloud == 'OVC':
+            return '☁️'
+        elif cloud == 'OVX':
+            return '🌫️'
+        else:
+            t = time()
+            latitude = data['lat']
+            longitude = data['lon']
+            elevation = data['elev']
+            dawn, dusk = dawn_dusk_calc(t, latitude, longitude, elevation)
+            t %= 86400
+            if dawn is not None and dusk is not None:
+                daytime = dawn < t and t < dusk if dawn <= dusk else t > dawn or t < dusk
+            else:
+                daytime = True
+            if cloud == 'SKC' or cloud == 'NCD' or cloud == 'CLR' or cloud == 'NSC' or cloud == 'CAVOK':
+                return '☀️' if daytime else '🌃'
+            elif cloud == 'FEW' or cloud == 'SCT':
+                return '🌤️' if daytime else '✨'
+            elif cloud == 'BKN':
+                return '🌥️' if daytime else '☁️'
+            else:
+                return None
+    else:
+        return None
+
+
+def print_temp(data, fahrenheit):
+    if 'temp' in data and data['temp'] is not None:
+        if fahrenheit:
+            return f'{round(data["temp"] * 1.8 + 32)}°F'
+        else:
+            return f'{data["temp"]}°C'
+    else:
+        return None
+
+
+def print_wspd(data, unit):
+    if 'wspd' in data and data['wspd'] is not None:
+        if i3status:
+            if data.get('wgst') is not None and data['wgst'] > 0:
+                red = '%.2X' % int(
+                    255 * (1 - min(1, data['wspd'] / data['wgst'])))
+            else:
+                red = 'BA'
+            out = ' <span color="#{red}BABA">'.format(
+                red=red) + '{wspd}</span>'
+        else:
+            out = ' {wspd}'
+        if unit == 'kn':
+            return out.format(wspd=f'{data["wspd"]} kn')
+        elif unit == 'km':
+            return out.format(wspd=f'{round(data["wspd"] * 1.852)} km/h')
+        elif unit == 'mi':
+            return out.format(wspd=f'{round(data["wspd"] * 1.15078)} mph')
+        else:
+            return None
+    else:
+        return None
+
+
+def print_hazards(data):
+    hazards = {'🥶': False, '❗': False, '💧': False,  # '🌢': False,
+               '❄️': False, '🌫': False}
+    wx_string = data.get('wxString')
+    if wx_string is not None:
+        hazards['🥶'] = 'FZ' in wx_string
+        hazards['❗'] = 'TS' in wx_string
+        hazards['❄️'] |= 'SN' in wx_string
+        hazards['💧'] = not hazards['❄️'] and 'RA' in wx_string
+        # hazards['🌢'] = 'BR' in wx_string
+        hazards['🌫'] = 'FG' in wx_string or 'HZ' in wx_string
+    hazards_str = ' '.join(filter(lambda key: hazards[key], hazards.keys()))
+    if len(hazards_str) > 0:
+        return hazards_str
+    else:
+        return None
+
+
+def get_data(icao):
+    with urllib.request.urlopen(urllib.request.Request(f"https://aviationweather.gov/cgi-bin/data/metar.php?ids={icao}&format=json"), timeout=10) as req:
+        return json.load(req)[0]
+
+
+def get_config():
+    config = configparser.ConfigParser()
+    config_path = os.environ['HOME'] + '/.config/weather.conf'
+    if os.path.isfile(config_path):
+        config.read(config_path)
+    else:
+        config.read_dict({
+            'location': {'icao': 'seqm'},  # default = Quito
+            'units': {'fahrenheit': False, 'wind': 'kn'}})
+        with open(config_path, 'w') as f:
+            config.write(f)
+    return config
+
+
+if __name__ == '__main__':
+    config = get_config()
+    if len(argv) > 1:
+        if argv[1] == '--i3status':
+            i3status = True
+            del argv[1]
+    data = get_data(argv[1] if len(argv) > 1 else config['location']['icao'])
+    print(*filter(lambda x: x is not None, (
+        print_hazards(data),
+        print_cloud(data),
+        print_temp(data, config['units'].getboolean('fahrenheit')),
+        print_wspd(data, config['units']['wind']))))

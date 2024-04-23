@@ -1,0 +1,12 @@
+#!/bin/sh
+# -vactive_first   := Should print active window, then stack?
+# -vafter_active   := Should print only windows after or equal to active?
+#                     When combined with -vreverse, condition is inverted,
+#                     i.e., active is not printed
+# -vcurr_workspace := Search current workspace only?
+# -vnum_windows    := Maximum number of windows to print (>=1)
+# -vprint_postfix  := Postfix of printed window ids
+# -vprint_prefix   := Prefix of printed window ids
+# -vreverse        := Should reverse stack? (default is most recent first)
+# -vskip_first     := Should skip first window?
+wmctrl -l | window_stack.awk "$@"

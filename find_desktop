@@ -1,0 +1,6 @@
+#!/bin/sh
+if [ -n "$XDG_DATA_DIRS" ]; then
+	printf '%s' "$XDG_DATA_DIRS" | awk -vfn="$1" -vRS=: 'BEGIN{print ENVIRON["HOME"] "/.local/share/applications"}{print $0 "/applications"}END{print "-type";print "f,l";print "-iname";print "*" fn "*.desktop"}' | xargs find 2> /dev/null
+else
+	find "$HOME/.local/share/applications" /usr/local/share/applications /usr/share/applications -type f,l -iname '*'"$1"'*.desktop' 2> /dev/null
+fi | xargs awk '$0=="NoDisplay=true"{p=0}f!=FILENAME{if(p){exit}f=FILENAME;p=1}END{if(p){print f}else{exit 1}}' /dev/null
